@@ -1,24 +1,6 @@
 #!/usr/bin/env python3
 """
 Evaluate retrieval accuracy of the Dharmamitra search API.
-
-Queries the API with (corrupted) segments and checks whether the correct
-segmentnr appears in the top-k results. Reports Recall@1/5/10/50.
-
-Usage:
-    python run_eval.py [options]
-
-Options:
-    --samples-per-lang  N     Samples per language (default: 10)
-    --languages         LANGS Comma-separated language codes (default: all)
-    --corruption-levels LEVS  Comma-separated levels to test (default: 0,10,20,30,50)
-    --corruption-types  TYPES Comma-separated types: none,crop,mask (default: all)
-    --search-type       TYPE  semantic|fuzzy|combined (default: semantic)
-    --do-ranking              Enable ranking (default: True)
-    --no-ranking              Disable ranking
-    --filter-lang             Pass filter_source_language=<lang> (default: False)
-    --api-url           URL   API base URL
-    --top-k             K     Maximum results to fetch (default: 50)
 """
 
 import argparse
@@ -49,16 +31,15 @@ def parse_args():
                    help="Pass filter_source_language matching query language")
     p.add_argument("--api-url", default=API_URL)
     p.add_argument("--top-k", type=int, default=50)
+    p.add_argument("--debug", action="store_true", help="Print request/response debugging info")
     return p.parse_args()
 
 
 def load_samples(args):
-    """Load and filter eval samples, capped at samples_per_lang per language."""
     languages = set(args.languages.split(",")) if args.languages else None
     corruption_levels = set(int(x) for x in args.corruption_levels.split(",")) if args.corruption_levels else None
     corruption_types = set(args.corruption_types.split(",")) if args.corruption_types else None
 
-    # Group by (language, segmentnr) then pick args.samples_per_lang unique segmentnrs per lang
     by_lang_seg = defaultdict(lambda: defaultdict(list))
     with open(DATASET_PATH, encoding="utf-8") as f:
         for line in f:
@@ -79,32 +60,75 @@ def load_samples(args):
     return samples
 
 
-def query_api(search_input, search_type, do_ranking, filter_lang, lang, api_url, top_k):
+def query_api(search_input, search_type, do_ranking, filter_lang, lang, api_url, top_k, debug=False):
+    # Payload matching the public /primary/ schema
     payload = {
         "search_input": search_input,
+        "input_encoding": "auto",
         "search_type": search_type,
+        "semantic_type": "both",
         "filter_source_language": lang if filter_lang else "all",
+        "filter_target_language": "all",
+        "source_filters": {
+            "include_files": [],
+            "include_categories": [],
+            "include_collections": [],
+        },
         "do_ranking": do_ranking,
-        "page_size": top_k,
+        "max_depth": top_k,
     }
-    data = json.dumps(payload).encode("utf-8")
+
+    if debug:
+        print(f"\nDEBUG request payload: {payload}", file=sys.stderr)
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         api_url,
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code}: {body}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Network error: {e}")
+
+    try:
+        res_data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Non-JSON response: {raw[:500]}")
+
+    if debug:
+        keys = list(res_data.keys()) if isinstance(res_data, dict) else None
+        print(f"DEBUG response type: {type(res_data).__name__}, keys: {keys}", file=sys.stderr)
+
+    if not isinstance(res_data, dict):
+        raise RuntimeError(f"Unexpected top-level response type: {type(res_data).__name__}")
+
+    if "results" not in res_data:
+        raise RuntimeError(f"Missing 'results' in response: {res_data}")
+
+    results = res_data["results"]
+
+    if not isinstance(results, list):
+        raise RuntimeError(f"'results' is not a list: {type(results).__name__}; response={res_data}")
+
+    return results
 
 
 def hits_at_k(results, target_segmentnr, k):
-    """Check if target_segmentnr appears in the top-k results."""
     for r in results[:k]:
-        # results may have 'segmentnr' or 'all_segmentnrs'
+        if not isinstance(r, dict):
+            continue
         if r.get("segmentnr") == target_segmentnr:
             return True
-        if target_segmentnr in r.get("all_segmentnrs", []):
+        all_segmentnrs = r.get("all_segmentnrs", [])
+        if isinstance(all_segmentnrs, list) and target_segmentnr in all_segmentnrs:
             return True
     return False
 
@@ -118,13 +142,19 @@ def main():
         sys.exit(1)
 
     print(f"Loaded {len(samples)} samples")
-    print(f"Settings: search_type={args.search_type}, do_ranking={args.do_ranking}, "
-          f"filter_lang={args.filter_lang}, top_k={args.top_k}")
+    print(
+        f"Settings: search_type={args.search_type}, do_ranking={args.do_ranking}, "
+        f"filter_lang={args.filter_lang}, top_k={args.top_k}"
+    )
     print()
 
-    # Stats: keyed by (language, corruption_type, corruption_level)
-    # Each value: dict of k -> [hit, hit, ...]
+    # Use only cutoffs that are <= requested top_k
+    ks = [k for k in TOP_KS if k <= args.top_k]
+    if not ks:
+        ks = [args.top_k]
+
     stats = defaultdict(lambda: defaultdict(list))
+    failures = 0
 
     for i, row in enumerate(samples, 1):
         lang = row["language"]
@@ -132,7 +162,11 @@ def main():
         ctype = row["corruption_type"]
         key = (lang, ctype, level)
 
-        print(f"[{i}/{len(samples)}] lang={lang} type={ctype} level={level} seg={row['segmentnr'][:40]}", end=" ", flush=True)
+        print(
+            f"[{i}/{len(samples)}] lang={lang} type={ctype} level={level} seg={row['segmentnr'][:40]}",
+            end=" ",
+            flush=True
+        )
 
         try:
             results = query_api(
@@ -143,38 +177,37 @@ def main():
                 lang=lang,
                 api_url=args.api_url,
                 top_k=args.top_k,
+                debug=args.debug,
             )
         except Exception as e:
+            failures += 1
             print(f"ERROR: {e}")
             continue
 
-        for k in TOP_KS:
+        for k in ks:
             hit = hits_at_k(results, row["segmentnr"], k)
             stats[key][k].append(hit)
 
-        hit_summary = " ".join(f"@{k}={'Y' if stats[key][k][-1] else 'N'}" for k in TOP_KS)
+        hit_summary = " ".join(f"@{k}={'Y' if stats[key][k][-1] else 'N'}" for k in ks)
         print(hit_summary)
-        time.sleep(0.1)  # be polite
+        time.sleep(0.1)
 
-    # Print results table
     print("\n" + "=" * 80)
     print("RESULTS")
     print("=" * 80)
 
-    # Aggregate by corruption level/type across all languages
     all_keys = sorted(stats.keys())
-
-    header = f"{'Lang':<6} {'Type':<6} {'Level':>5}  " + "  ".join(f"R@{k:>2}" for k in TOP_KS) + "  N"
+    header = f"{'Lang':<6} {'Type':<6} {'Level':>5}  " + "  ".join(f"R@{k:>2}" for k in ks) + "  N"
     print(header)
     print("-" * len(header))
 
-    aggregate = defaultdict(lambda: defaultdict(list))  # (ctype, level) -> k -> hits
+    aggregate = defaultdict(lambda: defaultdict(list))
 
     for (lang, ctype, level) in all_keys:
         row_stats = stats[(lang, ctype, level)]
-        n = len(row_stats[TOP_KS[0]])
+        n = len(row_stats[ks[0]])
         parts = []
-        for k in TOP_KS:
+        for k in ks:
             hits = row_stats[k]
             recall = sum(hits) / len(hits) if hits else 0.0
             parts.append(f"{recall:>5.1%}")
@@ -186,13 +219,16 @@ def main():
     print("-" * len(header))
     for (ctype, level) in sorted(aggregate.keys()):
         row_stats = aggregate[(ctype, level)]
-        n = len(row_stats[TOP_KS[0]])
+        n = len(row_stats[ks[0]])
         parts = []
-        for k in TOP_KS:
+        for k in ks:
             hits = row_stats[k]
             recall = sum(hits) / len(hits) if hits else 0.0
             parts.append(f"{recall:>5.1%}")
         print(f"{'ALL':<6} {ctype:<6} {level:>5}  {'  '.join(parts)}  {n}")
+
+    print()
+    print(f"Failures skipped: {failures}")
 
 
 if __name__ == "__main__":
