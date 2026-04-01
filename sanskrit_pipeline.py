@@ -392,7 +392,7 @@ def run_pipeline(
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "strategy": strategy,
-                "chunk_word_count": len(chunk_text.split()),
+                "chunk_size": chunk_size,
             })
 
     print(f"  {len(segments)} segments -> {len(rows)} chunks")
@@ -406,6 +406,7 @@ def save_for_eval(
     rows: List[dict],
     output_path: str,
     strategy: str,
+    chunk_size: int,
 ):
     """Write eval_dataset.jsonl compatible with run_eval.py."""
     with open(output_path, "w", encoding="utf-8") as f:
@@ -415,7 +416,7 @@ def save_for_eval(
                 "segmentnr": row["segmentnr"],
                 "original": row["original"],
                 "corrupted": row["chunk"],
-                "corruption_level": row["chunk_word_count"],
+                "corruption_level": chunk_size,
                 "corruption_type": strategy,
             }
             f.write(json.dumps(eval_row, ensure_ascii=False) + "\n")
@@ -492,7 +493,7 @@ def run_demo(args):
     print_samples(rows, n=len(segments))
 
     if args.output:
-        save_for_eval(rows, args.output, args.strategy)
+        save_for_eval(rows, args.output, args.strategy, args.chunk_size)
 
 
 # ================================= CLI =====================================
@@ -649,7 +650,7 @@ def main():
     # ---- Show & save ----
     print()
     print_samples(rows)
-    save_for_eval(rows, args.output, args.strategy)
+    save_for_eval(rows, args.output, args.strategy, args.chunk_size)
 
 
 if __name__ == "__main__":

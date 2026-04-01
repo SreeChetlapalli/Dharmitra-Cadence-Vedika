@@ -238,7 +238,7 @@ The pipeline produces a `.jsonl` file (one JSON object per line) compatible with
 
 The field names `corrupted`, `corruption_level`, and `corruption_type` exist for compatibility with `run_eval.py`. Despite the names:
 - `corrupted` contains a **clean chunk** (nothing is corrupted)
-- `corruption_level` stores the **word count** of the chunk
+- `corruption_level` stores the **chunk size** setting (a grouping key, not a per-chunk measurement)
 - `corruption_type` stores the **strategy name**
 
 ---
