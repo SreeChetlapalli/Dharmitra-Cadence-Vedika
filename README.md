@@ -6,24 +6,12 @@ Benchmark different ways of splitting Sanskrit text for search and retrieval.
 
 Everything below assumes you have Python 3.9+ and have already set up the virtual environment. If not, jump to [Setup](#setup) first.
 
-### 1. Extract Sanskrit passages (with segmentnrs) from the pre-generated dataset
+### 1. Extract Sanskrit passages from the pre-generated dataset
 
 The repo ships with `eval_dataset.jsonl`, which contains 1,000 Sanskrit passages (plus Tibetan, Chinese, and Pali). Extract just the Sanskrit into a `.jsonl` file that preserves the segment IDs needed for benchmarking:
 
 ```bash
-python -c "
-import json
-seen = set()
-with open('eval_dataset.jsonl', encoding='utf-8') as f, open('sanskrit_input.jsonl', 'w', encoding='utf-8') as out:
-    for line in f:
-        row = json.loads(line)
-        if row['language'] == 'sa' and row['corruption_level'] == 0:
-            key = row['segmentnr']
-            if key not in seen:
-                seen.add(key)
-                out.write(json.dumps({'segmentnr': key, 'original': row['original']}, ensure_ascii=False) + '\n')
-print(f'Extracted {len(seen)} passages to sanskrit_input.jsonl')
-"
+python extract_sanskrit.py
 ```
 
 This creates `sanskrit_input.jsonl` -- one passage per line, each with its `segmentnr` so that benchmarking can match API results back to the source.
@@ -329,11 +317,12 @@ Output:
 
 | File | Purpose |
 |---|---|
+| `extract_sanskrit.py` | Extract Sanskrit passages from `eval_dataset.jsonl`, preserving segment IDs |
 | `sanskrit_pipeline.py` | Chunking pipeline: normalize, punctuate, chunk, save |
 | `run_eval.py` | Benchmark: query Dharmamitra API with chunks, measure Recall@K |
 | `generate_eval_dataset.py` | Original eval dataset generator (crop/mask corruption across 4 languages) |
 | `eval_dataset.jsonl` | Pre-generated dataset with 1,000 passages each in Sanskrit, Tibetan, Chinese, and Pali |
-| `sanskrit_input.jsonl` | Extracted Sanskrit passages with segment IDs (created from eval_dataset.jsonl, see Quick Start) |
+| `sanskrit_input.jsonl` | Extracted Sanskrit passages with segment IDs (created by `extract_sanskrit.py`) |
 | `requirements.txt` | Python dependencies |
 
 ## Dependencies
