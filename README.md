@@ -248,7 +248,7 @@ The field names `corrupted`, `corruption_level`, and `corruption_type` exist for
 ### Prerequisites
 
 - Python 3.9+
-- A HuggingFace account (for Cadence model weights)
+- A HuggingFace account (needed to download Cadence model weights — see below)
 
 ### Installation
 
@@ -265,19 +265,31 @@ source mitraVenv/bin/activate
 pip install -r requirements.txt
 ```
 
-### HuggingFace login (needed for Cadence)
+### HuggingFace login and Cadence model weights
+
+The Cadence punctuation model is hosted on HuggingFace and requires authentication to download. The weights are **not** included in this repo — they are downloaded automatically the first time you run the pipeline without `--skip-punctuation`.
+
+**Step 1: Get a HuggingFace token**
+
+Go to https://huggingface.co/settings/tokens and create a token (the free "Read" tier is sufficient).
+
+**Step 2: Save the token locally**
 
 ```bash
 python -c "from huggingface_hub import login; login()"
 ```
 
-If that fails due to network issues, save your token manually:
+This will prompt you for the token and save it to `~/.cache/huggingface/token`. If that fails due to network issues, save it manually:
 
 ```bash
 python -c "from huggingface_hub import HfFolder; HfFolder.save_token('YOUR_TOKEN_HERE')"
 ```
 
-Get your token from https://huggingface.co/settings/tokens.
+**Step 3: First run downloads the weights**
+
+The first time you run the pipeline without `--skip-punctuation`, it will download the Cadence model weights (~350 MB for Cadence-Fast, larger for the full Cadence model). This is a one-time download — subsequent runs use the cached weights from `~/.cache/huggingface/`.
+
+If you want to skip Cadence entirely (e.g. your text already has dandas, or you just want to test the pipeline quickly), pass `--skip-punctuation` and no HuggingFace login is needed.
 
 ---
 

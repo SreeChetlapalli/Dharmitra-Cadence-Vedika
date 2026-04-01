@@ -13,12 +13,19 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
 import time
 from pathlib import Path
 from typing import List
+
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ---------------------------------------------------------------------------
 # Vedika imports — the package __init__.py unconditionally downloads model
@@ -647,10 +654,10 @@ def main():
         skip_punctuation=args.skip_punctuation,
     )
 
-    # ---- Show & save ----
+    # ---- Save & show ----
+    save_for_eval(rows, args.output, args.strategy, args.chunk_size)
     print()
     print_samples(rows)
-    save_for_eval(rows, args.output, args.strategy, args.chunk_size)
 
 
 if __name__ == "__main__":
