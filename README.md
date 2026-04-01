@@ -1,6 +1,83 @@
 # DharmaNexus Evaluation
 
-A retrieval evaluation benchmark for Sanskrit texts, with a chunking pipeline that uses NLP-based punctuation restoration to split text at natural boundaries.
+Benchmark different ways of splitting Sanskrit text for search and retrieval.
+
+## Quick Start
+
+Everything below assumes you have Python 3.9+ and have already set up the virtual environment. If not, jump to [Setup](#setup) first.
+
+### 1. Extract Sanskrit texts from the pre-generated dataset
+
+The repo ships with `eval_dataset.jsonl`, which contains 1,000 Sanskrit passages (plus Tibetan, Chinese, and Pali). Extract just the Sanskrit:
+
+```bash
+python -c "
+import json
+seen = set()
+with open('eval_dataset.jsonl', encoding='utf-8') as f, open('sanskrit_texts.txt', 'w', encoding='utf-8') as out:
+    for line in f:
+        row = json.loads(line)
+        if row['language'] == 'sa' and row['corruption_level'] == 0:
+            seg = row['original']
+            if seg not in seen:
+                seen.add(seg)
+                out.write(seg + '\n')
+print(f'Extracted {len(seen)} passages to sanskrit_texts.txt')
+"
+```
+
+This creates `sanskrit_texts.txt` with one passage per line.
+
+### 2. Run the chunking pipeline
+
+```bash
+# Quick test on 10 passages, skip Cadence model (fast)
+python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy sentence --sample-size 10 --skip-punctuation
+
+# Full run on all 1,000 passages with Cadence punctuation
+python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy sentence
+```
+
+This produces `sanskrit_chunks_sentence.jsonl`.
+
+### 3. Benchmark against the Dharmamitra search API
+
+`run_eval.py` always reads from `eval_dataset.jsonl`, so copy your output there first:
+
+```bash
+# Back up the original
+copy eval_dataset.jsonl eval_dataset_backup.jsonl
+
+# Use your chunks as the evaluation dataset
+copy sanskrit_chunks_sentence.jsonl eval_dataset.jsonl
+
+# Run evaluation (queries the Dharmamitra API)
+python run_eval.py --languages sa --corruption-types sentence --samples-per-lang 50
+```
+
+The output shows Recall@K -- how often a chunk retrieves its source passage. Higher is better.
+
+### 4. Compare strategies
+
+Repeat steps 2-3 with different strategies:
+
+```bash
+python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy fixed_size --chunk-size 30
+copy sanskrit_chunks_fixed_size.jsonl eval_dataset.jsonl
+python run_eval.py --languages sa --corruption-types fixed_size --samples-per-lang 50
+
+python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy sliding_window --chunk-size 30 --overlap 0.25
+copy sanskrit_chunks_sliding_window.jsonl eval_dataset.jsonl
+python run_eval.py --languages sa --corruption-types sliding_window --samples-per-lang 50
+
+python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy hierarchical
+copy sanskrit_chunks_hierarchical.jsonl eval_dataset.jsonl
+python run_eval.py --languages sa --corruption-types hierarchical --samples-per-lang 50
+```
+
+The strategy with the highest Recall@K is the best chunking method for search.
+
+---
 
 ## What This Project Does
 
@@ -10,17 +87,20 @@ Sanskrit texts from digital corpora often lack punctuation, which makes it hard 
 2. **Add punctuation** using a neural model (restore dandas where they belong)
 3. **Chunk** the text into retrieval-ready segments using different splitting strategies
 
-You can then **benchmark** which chunking strategy works best by feeding the chunks into the Dharmamitra search API and measuring how often each chunk retrieves its source passage.
+You then benchmark which chunking strategy works best by feeding the chunks into the Dharmamitra search API and measuring Recall@K.
 
-## How It Works
+### How it flows
 
 ```
                            sanskrit_pipeline.py
  ┌──────────────┐    ┌─────────────────────────────────────────────┐    ┌──────────────┐
  │  Sanskrit     │    │                                             │    │  Chunks      │
- │  Corpus       │───>│  Normalize ──> Punctuate ──> Chunk          │───>│  (.jsonl)    │
- │  (.json/.txt) │    │  (Vedika)      (Cadence)     (4 strategies) │    │              │
+ │  text         │───>│  Normalize ──> Punctuate ──> Chunk          │───>│  (.jsonl)    │
+ │  (.txt/.json) │    │  (Vedika)      (Cadence)     (4 strategies) │    │              │
  └──────────────┘    └─────────────────────────────────────────────┘    └──────┬───────┘
+                                                                              │
+                                                                         copy to
+                                                                      eval_dataset.jsonl
                                                                               │
                                                                               v
                                                                     ┌──────────────────┐
@@ -31,13 +111,13 @@ You can then **benchmark** which chunking strategy works best by feeding the chu
                                                                     └──────────────────┘
 ```
 
-Each input passage gets split into one or more chunks. Each chunk becomes a row in the output file. When you run evaluation, the API is queried with each chunk, and success means the API found the original source passage. **Higher Recall@K = better chunking strategy** -- the chunks preserve enough meaning to find the source.
+---
 
 ## Pipeline Steps
 
 ### Step 1: Normalize (Vedika)
 
-Cleans up character-level encoding issues using the [Vedika](https://github.com/tanuj437/Vedika) toolkit:
+Cleans up character-level encoding issues using [Vedika](https://github.com/tanuj437/Vedika):
 - Unicode NFC normalization
 - Anusvara correction (nasal consonant based on following letter)
 - Visarga standardization
@@ -45,17 +125,23 @@ Cleans up character-level encoding issues using the [Vedika](https://github.com/
 
 ### Step 2: Punctuate (Cadence)
 
-Restores missing sentence-boundary punctuation using [Cadence-Fast](https://huggingface.co/ai4bharat/Cadence-Fast), a multilingual punctuation restoration model by AI4Bharat. It predicts where dandas, double-dandas, commas, and other marks belong. This is what makes sentence-level chunking possible on texts that originally had no punctuation.
+Restores missing sentence-boundary punctuation using [Cadence](https://huggingface.co/ai4bharat/Cadence-Fast), a multilingual model by AI4Bharat. It predicts where dandas (`।`), double-dandas (`॥`), commas, and other marks belong. This is what makes sentence-level chunking possible on texts that originally had no punctuation.
 
-Can be skipped with `--skip-punctuation` if the input text already has dandas.
+Skip this step with `--skip-punctuation` if your text already has dandas.
+
+Choose the model variant with `--model`:
+- `Cadence-Fast` (default) -- smaller, ~4x faster, 93.8% of full quality
+- `Cadence` -- full 1B parameter model, highest accuracy
 
 ### Step 3: Chunk (4 strategies)
 
-Splits the punctuated text into pieces. Each strategy produces a different set of chunks from the same input.
+Splits the punctuated text into pieces. No text is removed or corrupted -- every word is preserved.
+
+---
 
 ## Chunking Strategies
 
-### sentence
+### `sentence`
 
 Splits at danda / double-danda boundaries. Each sentence becomes its own chunk.
 
@@ -64,7 +150,7 @@ Input:  "धर्मो रक्षति रक्षितः। सत्�
 Output: ["धर्मो रक्षति रक्षितः", "सत्यं वद", "धर्मं चर"]
 ```
 
-### fixed_size
+### `fixed_size`
 
 Groups sentences into chunks of approximately N words (set by `--chunk-size`). Breaks at the nearest sentence boundary to avoid cutting mid-sentence.
 
@@ -74,7 +160,7 @@ Input:  "धर्मो रक्षति रक्षितः। सत्�
 Output: ["धर्मो रक्षति रक्षितः सत्यं वद", "धर्मं चर स्वाध्यायान्मा प्रमदः"]
 ```
 
-### sliding_window
+### `sliding_window`
 
 Overlapping word-windows of N words with configurable overlap (default 25%). Every part of the text appears in at least one chunk, with redundancy at boundaries.
 
@@ -84,7 +170,7 @@ Input:  "a b c d e f g h i"
 Output: ["a b c d e f", "d e f g h i"]
 ```
 
-### hierarchical
+### `hierarchical`
 
 Produces chunks at three granularity levels from the same text:
 - **Level 1**: Individual sentences
@@ -93,9 +179,24 @@ Produces chunks at three granularity levels from the same text:
 
 All levels go into the output, so retrieval can be tested at each granularity.
 
-## Inputs
+---
 
-### DharmaNexus JSON segments (`--segments-dir`)
+## Input Sources
+
+You need one of these three options:
+
+### Option A: Plain text file (`--input-file`)
+
+A UTF-8 `.txt` file where each line is one passage. This is the simplest option.
+
+```
+धर्मो रक्षति रक्षितः सत्यं वद धर्मं चर
+यदा यदा हि धर्मस्य ग्लानिर्भवति भारत
+```
+
+You can create this by extracting from `eval_dataset.jsonl` (see [Quick Start](#quick-start)) or by writing your own.
+
+### Option B: DharmaNexus JSON segments (`--segments-dir`)
 
 A directory of `.json` files where each file contains a list of segment objects:
 
@@ -106,22 +207,21 @@ A directory of `.json` files where each file contains a list of segment objects:
 ]
 ```
 
-### Plain text file (`--input-file`)
+Get these by cloning `https://github.com/dharmamitra/dharmanexus-sanskrit` (if publicly accessible) or from [GRETIL](https://gretil.sub.uni-goettingen.de/).
 
-A UTF-8 `.txt` file where each line is one passage:
-
-```
-धर्मो रक्षति रक्षितः सत्यं वद धर्मं चर
-यदा यदा हि धर्मस्य ग्लानिर्भवति भारत
-```
-
-### Built-in demo (`--demo`)
+### Option C: Built-in demo (`--demo`)
 
 Five hardcoded Sanskrit verses for quick testing. No files needed.
 
-## Output
+```bash
+python sanskrit_pipeline.py --demo --skip-punctuation
+```
 
-A `.jsonl` file (one JSON object per line) compatible with `run_eval.py`:
+---
+
+## Output Format
+
+The pipeline produces a `.jsonl` file (one JSON object per line) compatible with `run_eval.py`:
 
 ```json
 {
@@ -134,28 +234,12 @@ A `.jsonl` file (one JSON object per line) compatible with `run_eval.py`:
 }
 ```
 
-The field names `corrupted`, `corruption_level`, and `corruption_type` are kept for compatibility with `run_eval.py`. The content in `corrupted` is a clean chunk (not corrupted text). `corruption_level` stores the chunk size, and `corruption_type` stores the strategy name.
+The field names `corrupted`, `corruption_level`, and `corruption_type` exist for compatibility with `run_eval.py`. Despite the names:
+- `corrupted` contains a **clean chunk** (nothing is corrupted)
+- `corruption_level` stores the **chunk size**
+- `corruption_type` stores the **strategy name**
 
-## Benchmarking
-
-To compare chunking strategies:
-
-```bash
-# Generate chunks with each strategy
-python sanskrit_pipeline.py --segments-dir ./segments --strategy sentence -o chunks_sentence.jsonl --skip-punctuation
-python sanskrit_pipeline.py --segments-dir ./segments --strategy fixed_size --chunk-size 30 -o chunks_fixed.jsonl --skip-punctuation
-python sanskrit_pipeline.py --segments-dir ./segments --strategy sliding_window --chunk-size 30 -o chunks_sliding.jsonl --skip-punctuation
-python sanskrit_pipeline.py --segments-dir ./segments --strategy hierarchical -o chunks_hierarchical.jsonl --skip-punctuation
-
-# Evaluate each against the Dharmamitra search API
-copy chunks_sentence.jsonl eval_dataset.jsonl
-python run_eval.py --languages sa --corruption-types sentence --samples-per-lang 10
-
-copy chunks_fixed.jsonl eval_dataset.jsonl
-python run_eval.py --languages sa --corruption-types fixed_size --samples-per-lang 10
-```
-
-The strategy with the highest Recall@K produces chunks that best preserve enough meaning for retrieval.
+---
 
 ## Setup
 
@@ -177,69 +261,64 @@ mitraVenv\Scripts\activate
 source mitraVenv/bin/activate
 
 pip install -r requirements.txt
+```
 
-# Log in to HuggingFace (needed for Cadence model download)
+### HuggingFace login (needed for Cadence)
+
+```bash
 python -c "from huggingface_hub import login; login()"
 ```
 
-### Getting Sanskrit Data
+If that fails due to network issues, save your token manually:
 
 ```bash
-git clone https://github.com/dharmamitra/dharmanexus-sanskrit
+python -c "from huggingface_hub import HfFolder; HfFolder.save_token('YOUR_TOKEN_HERE')"
 ```
 
-If not publicly accessible, the underlying texts come from [GRETIL](https://gretil.sub.uni-goettingen.de/).
+Get your token from https://huggingface.co/settings/tokens.
 
-## Usage
-
-```bash
-# Quick demo (no data needed, skips model download)
-python sanskrit_pipeline.py --demo --skip-punctuation
-
-# Demo with Cadence punctuation (downloads model on first run)
-python sanskrit_pipeline.py --demo
-
-# Process DharmaNexus segments
-python sanskrit_pipeline.py --segments-dir /path/to/segments --strategy sentence
-
-# Process a text file with sliding window chunks
-python sanskrit_pipeline.py --input-file texts.txt --strategy sliding_window --chunk-size 40 --overlap 0.3
-
-# Sample 100 segments and use hierarchical chunking
-python sanskrit_pipeline.py --segments-dir ./segments --strategy hierarchical --sample-size 100
-```
+---
 
 ## CLI Reference
 
 ```
 sanskrit_pipeline.py
-  --segments-dir DIR        DharmaNexus .json segment directory
-  --input-file FILE         Plain UTF-8 .txt file (one passage per line)
-  --demo                    Built-in sample texts
 
-  --strategy STRATEGY       sentence | fixed_size | sliding_window | hierarchical
-  --chunk-size N            Target words per chunk (default: 50)
-  --overlap FRAC            Overlap for sliding_window, 0.0-1.0 (default: 0.25)
+Input (pick one):
+  --input-file FILE       Plain UTF-8 .txt file (one passage per line)
+  --segments-dir DIR      DharmaNexus .json segment directory
+  --demo                  Run on built-in sample texts
 
-  --model MODEL             Cadence or Cadence-Fast (default: Cadence-Fast)
-  --batch-size N            Cadence batch size (default: 8)
-  --cpu / --gpu             Inference device (default: cpu)
-  --skip-punctuation        Skip Cadence if text already has dandas
+Chunking:
+  --strategy STRATEGY     sentence | fixed_size | sliding_window | hierarchical (default: sentence)
+  --chunk-size N          Target words per chunk (default: 50)
+  --overlap FRAC          Overlap fraction for sliding_window, 0.0-1.0 (default: 0.25)
 
-  --output, -o FILE         Output .jsonl path
-  --seed N                  Random seed (default: 42)
-  --sample-size N           Sample N segments from input
-  --min-length N            Skip segments shorter than N chars (default: 30)
+Cadence model:
+  --model MODEL           Cadence or Cadence-Fast (default: Cadence-Fast)
+  --batch-size N          Cadence batch size (default: 8)
+  --cpu                   Force CPU inference (default)
+  --gpu                   Use GPU for inference
+  --skip-punctuation      Skip Cadence entirely (use if text already has dandas)
+
+Output:
+  --output, -o FILE       Output .jsonl path (default: sanskrit_chunks_<strategy>.jsonl)
+  --sample-size N         Only process N randomly-selected passages (good for quick tests)
+  --min-length N          Skip passages shorter than N characters (default: 30)
+  --seed N                Random seed for sampling (default: 42)
 ```
+
+---
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `sanskrit_pipeline.py` | Chunking pipeline: normalize, punctuate, chunk, save |
+| `run_eval.py` | Benchmark: query Dharmamitra API with chunks, measure Recall@K |
 | `generate_eval_dataset.py` | Original eval dataset generator (crop/mask corruption across 4 languages) |
-| `run_eval.py` | Evaluation: query Dharmamitra API with chunks, measure Recall@K |
-| `eval_dataset.jsonl` | Pre-generated evaluation dataset |
+| `eval_dataset.jsonl` | Pre-generated dataset with 1,000 passages each in Sanskrit, Tibetan, Chinese, and Pali |
+| `sanskrit_texts.txt` | Extracted Sanskrit passages (created from eval_dataset.jsonl, see Quick Start) |
 | `requirements.txt` | Python dependencies |
 
 ## Dependencies
@@ -247,7 +326,7 @@ sanskrit_pipeline.py
 | Package | Version | Role |
 |---|---|---|
 | [cadence-punctuation](https://pypi.org/project/cadence-punctuation/) | >= 1.1.0 | Punctuation restoration |
-| [vedika](https://pypi.org/project/vedika/) | >= 0.0.18 | Sanskrit text normalization and sentence splitting |
+| [vedika](https://pypi.org/project/vedika/) | >= 0.0.18 | Sanskrit normalization and sentence splitting |
 | [torch](https://pytorch.org/) | >= 2.1.0 | Neural network runtime for Cadence |
 | [transformers](https://huggingface.co/docs/transformers/) | >= 4.51.3, < 5.0.0 | Model loading |
 | [huggingface_hub](https://pypi.org/project/huggingface-hub/) | >= 0.30.2 | Model downloads |
