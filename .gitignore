@@ -2,3 +2,15 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Virtual environment
+mitraVenv/
+.venv/
+venv/
+
+# Pipeline output
+sanskrit_eval_*.jsonl
+sanskrit_chunks_*.jsonl
+
+# HuggingFace cache
+.cache/

@@ -1,0 +1,5 @@
+cadence-punctuation>=1.1.0
+vedika>=0.0.18
+huggingface_hub>=0.30.2
+torch>=2.1.0
+transformers>=4.51.3,<5.0.0
