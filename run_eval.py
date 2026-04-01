@@ -23,7 +23,7 @@ def parse_args():
     p.add_argument("--samples-per-lang", type=int, default=10)
     p.add_argument("--languages", default=None, help="Comma-separated, e.g. bo,zh")
     p.add_argument("--corruption-levels", default=None, help="Comma-separated, e.g. 0,10,20")
-    p.add_argument("--corruption-types", default=None, help="Comma-separated: none,crop,mask")
+    p.add_argument("--corruption-types", default=None, help="Comma-separated, e.g. none,crop,mask or sentence,fixed_size,sliding_window,hierarchical")
     p.add_argument("--search-type", default="semantic", choices=["semantic", "fuzzy", "combined"])
     p.add_argument("--do-ranking", dest="do_ranking", action="store_true", default=True)
     p.add_argument("--no-ranking", dest="do_ranking", action="store_false")

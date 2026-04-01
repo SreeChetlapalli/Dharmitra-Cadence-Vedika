@@ -6,43 +6,45 @@ Benchmark different ways of splitting Sanskrit text for search and retrieval.
 
 Everything below assumes you have Python 3.9+ and have already set up the virtual environment. If not, jump to [Setup](#setup) first.
 
-### 1. Extract Sanskrit texts from the pre-generated dataset
+### 1. Extract Sanskrit passages (with segmentnrs) from the pre-generated dataset
 
-The repo ships with `eval_dataset.jsonl`, which contains 1,000 Sanskrit passages (plus Tibetan, Chinese, and Pali). Extract just the Sanskrit:
+The repo ships with `eval_dataset.jsonl`, which contains 1,000 Sanskrit passages (plus Tibetan, Chinese, and Pali). Extract just the Sanskrit into a `.jsonl` file that preserves the segment IDs needed for benchmarking:
 
 ```bash
 python -c "
 import json
 seen = set()
-with open('eval_dataset.jsonl', encoding='utf-8') as f, open('sanskrit_texts.txt', 'w', encoding='utf-8') as out:
+with open('eval_dataset.jsonl', encoding='utf-8') as f, open('sanskrit_input.jsonl', 'w', encoding='utf-8') as out:
     for line in f:
         row = json.loads(line)
         if row['language'] == 'sa' and row['corruption_level'] == 0:
-            seg = row['original']
-            if seg not in seen:
-                seen.add(seg)
-                out.write(seg + '\n')
-print(f'Extracted {len(seen)} passages to sanskrit_texts.txt')
+            key = row['segmentnr']
+            if key not in seen:
+                seen.add(key)
+                out.write(json.dumps({'segmentnr': key, 'original': row['original']}, ensure_ascii=False) + '\n')
+print(f'Extracted {len(seen)} passages to sanskrit_input.jsonl')
 "
 ```
 
-This creates `sanskrit_texts.txt` with one passage per line.
+This creates `sanskrit_input.jsonl` -- one passage per line, each with its `segmentnr` so that benchmarking can match API results back to the source.
+
+> **Why `.jsonl` and not `.txt`?** The `run_eval.py` benchmark checks whether the Dharmamitra API returns a result whose segment ID matches the chunk's segment ID. If you use `--input-file` with a plain `.txt`, the pipeline assigns synthetic IDs like `sanskrit_texts:1` which won't match the API, so Recall will always be 0%. Using `--jsonl-input` preserves the real segment IDs.
 
 ### 2. Run the chunking pipeline
 
 ```bash
 # Quick test on 10 passages, skip Cadence model (fast)
-python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy sentence --sample-size 10 --skip-punctuation
+python sanskrit_pipeline.py --jsonl-input sanskrit_input.jsonl --strategy sentence --sample-size 10 --skip-punctuation
 
 # Full run on all 1,000 passages with Cadence punctuation
-python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy sentence
+python sanskrit_pipeline.py --jsonl-input sanskrit_input.jsonl --strategy sentence
 ```
 
 This produces `sanskrit_chunks_sentence.jsonl`.
 
 ### 3. Benchmark against the Dharmamitra search API
 
-`run_eval.py` always reads from `eval_dataset.jsonl`, so copy your output there first:
+`run_eval.py` always reads from `eval_dataset.jsonl`, so copy your chunks file there first:
 
 ```bash
 # Back up the original
@@ -62,15 +64,15 @@ The output shows Recall@K -- how often a chunk retrieves its source passage. Hig
 Repeat steps 2-3 with different strategies:
 
 ```bash
-python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy fixed_size --chunk-size 30
+python sanskrit_pipeline.py --jsonl-input sanskrit_input.jsonl --strategy fixed_size --chunk-size 30
 copy sanskrit_chunks_fixed_size.jsonl eval_dataset.jsonl
 python run_eval.py --languages sa --corruption-types fixed_size --samples-per-lang 50
 
-python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy sliding_window --chunk-size 30 --overlap 0.25
+python sanskrit_pipeline.py --jsonl-input sanskrit_input.jsonl --strategy sliding_window --chunk-size 30 --overlap 0.25
 copy sanskrit_chunks_sliding_window.jsonl eval_dataset.jsonl
 python run_eval.py --languages sa --corruption-types sliding_window --samples-per-lang 50
 
-python sanskrit_pipeline.py --input-file sanskrit_texts.txt --strategy hierarchical
+python sanskrit_pipeline.py --jsonl-input sanskrit_input.jsonl --strategy hierarchical
 copy sanskrit_chunks_hierarchical.jsonl eval_dataset.jsonl
 python run_eval.py --languages sa --corruption-types hierarchical --samples-per-lang 50
 ```
@@ -96,7 +98,8 @@ You then benchmark which chunking strategy works best by feeding the chunks into
  ┌──────────────┐    ┌─────────────────────────────────────────────┐    ┌──────────────┐
  │  Sanskrit     │    │                                             │    │  Chunks      │
  │  text         │───>│  Normalize ──> Punctuate ──> Chunk          │───>│  (.jsonl)    │
- │  (.txt/.json) │    │  (Vedika)      (Cadence)     (4 strategies) │    │              │
+ │  (.jsonl/     │    │  (Vedika)      (Cadence)     (4 strategies) │    │              │
+ │   .txt/.json) │    │                                             │    │              │
  └──────────────┘    └─────────────────────────────────────────────┘    └──────┬───────┘
                                                                               │
                                                                          copy to
@@ -194,9 +197,20 @@ A UTF-8 `.txt` file where each line is one passage. This is the simplest option.
 यदा यदा हि धर्मस्य ग्लानिर्भवति भारत
 ```
 
-You can create this by extracting from `eval_dataset.jsonl` (see [Quick Start](#quick-start)) or by writing your own.
+You can write your own `.txt` file for quick experiments. For benchmarking, use `--jsonl-input` instead (see below) so that segment IDs are preserved.
 
-### Option B: DharmaNexus JSON segments (`--segments-dir`)
+### Option B: JSONL file with segment IDs (`--jsonl-input`)
+
+A `.jsonl` file where each line is a JSON object with `segmentnr` and `original` fields. This is the recommended option for benchmarking because it preserves the real segment IDs that `run_eval.py` needs.
+
+```json
+{"segmentnr": "SA_GRETIL_001:42", "original": "Sanskrit text here"}
+{"segmentnr": "SA_GRETIL_001:43", "original": "More Sanskrit text"}
+```
+
+Create this by extracting from `eval_dataset.jsonl` (see [Quick Start](#quick-start)).
+
+### Option C: DharmaNexus JSON segments (`--segments-dir`)
 
 A directory of `.json` files where each file contains a list of segment objects:
 
@@ -209,7 +223,7 @@ A directory of `.json` files where each file contains a list of segment objects:
 
 Get these by cloning `https://github.com/dharmamitra/dharmanexus-sanskrit` (if publicly accessible) or from [GRETIL](https://gretil.sub.uni-goettingen.de/).
 
-### Option C: Built-in demo (`--demo`)
+### Option D: Built-in demo (`--demo`)
 
 Five hardcoded Sanskrit verses for quick testing. No files needed.
 
@@ -236,7 +250,7 @@ The pipeline produces a `.jsonl` file (one JSON object per line) compatible with
 
 The field names `corrupted`, `corruption_level`, and `corruption_type` exist for compatibility with `run_eval.py`. Despite the names:
 - `corrupted` contains a **clean chunk** (nothing is corrupted)
-- `corruption_level` stores the **chunk size**
+- `corruption_level` stores the **word count** of the chunk
 - `corruption_type` stores the **strategy name**
 
 ---
@@ -285,6 +299,7 @@ Get your token from https://huggingface.co/settings/tokens.
 sanskrit_pipeline.py
 
 Input (pick one):
+  --jsonl-input FILE      .jsonl file with segmentnr + original (best for benchmarking)
   --input-file FILE       Plain UTF-8 .txt file (one passage per line)
   --segments-dir DIR      DharmaNexus .json segment directory
   --demo                  Run on built-in sample texts
@@ -318,7 +333,7 @@ Output:
 | `run_eval.py` | Benchmark: query Dharmamitra API with chunks, measure Recall@K |
 | `generate_eval_dataset.py` | Original eval dataset generator (crop/mask corruption across 4 languages) |
 | `eval_dataset.jsonl` | Pre-generated dataset with 1,000 passages each in Sanskrit, Tibetan, Chinese, and Pali |
-| `sanskrit_texts.txt` | Extracted Sanskrit passages (created from eval_dataset.jsonl, see Quick Start) |
+| `sanskrit_input.jsonl` | Extracted Sanskrit passages with segment IDs (created from eval_dataset.jsonl, see Quick Start) |
 | `requirements.txt` | Python dependencies |
 
 ## Dependencies

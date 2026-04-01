@@ -18,7 +18,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 # ---------------------------------------------------------------------------
 # Vedika imports — the package __init__.py unconditionally downloads model
@@ -114,6 +114,36 @@ def load_segments_from_txt(txt_path: str, min_length: int = 30) -> List[dict]:
     return segments
 
 
+def load_segments_from_jsonl(jsonl_path: str, min_length: int = 30) -> List[dict]:
+    """
+    Load segments from a .jsonl file, preserving the original segmentnr.
+
+    Each line must be a JSON object with at least an "original" field.
+    If "segmentnr" is present it is kept; otherwise a synthetic one is assigned.
+    Rows can optionally be filtered to a single language via the "language" field.
+    """
+    path = Path(jsonl_path)
+    if not path.is_file():
+        print(f"Error: file not found: {jsonl_path}", file=sys.stderr)
+        sys.exit(1)
+
+    segments: list[dict] = []
+    with open(path, encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            text = (row.get("original") or "").strip()
+            if len(text) < min_length:
+                continue
+            segments.append({
+                "segmentnr": row.get("segmentnr", f"{path.stem}:{i}"),
+                "original": text,
+            })
+    return segments
+
+
 # =========================== Normalisation =================================
 
 
@@ -131,7 +161,7 @@ def normalize_text(text: str) -> str:
 # ============================ Punctuation ==================================
 
 
-_cadence_model: Optional[PunctuationModel] = None
+_cadence_model = None
 
 
 def get_cadence_model(model_name: str = "Cadence-Fast", cpu: bool = True):
@@ -362,7 +392,7 @@ def run_pipeline(
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "strategy": strategy,
-                "chunk_size": chunk_size,
+                "chunk_word_count": len(chunk_text.split()),
             })
 
     print(f"  {len(segments)} segments -> {len(rows)} chunks")
@@ -376,7 +406,6 @@ def save_for_eval(
     rows: List[dict],
     output_path: str,
     strategy: str,
-    chunk_size: int,
 ):
     """Write eval_dataset.jsonl compatible with run_eval.py."""
     with open(output_path, "w", encoding="utf-8") as f:
@@ -386,7 +415,7 @@ def save_for_eval(
                 "segmentnr": row["segmentnr"],
                 "original": row["original"],
                 "corrupted": row["chunk"],
-                "corruption_level": chunk_size,
+                "corruption_level": row["chunk_word_count"],
                 "corruption_type": strategy,
             }
             f.write(json.dumps(eval_row, ensure_ascii=False) + "\n")
@@ -463,7 +492,7 @@ def run_demo(args):
     print_samples(rows, n=len(segments))
 
     if args.output:
-        save_for_eval(rows, args.output, args.strategy, args.chunk_size)
+        save_for_eval(rows, args.output, args.strategy)
 
 
 # ================================= CLI =====================================
@@ -482,7 +511,11 @@ def parse_args():
     )
     src.add_argument(
         "--input-file",
-        help="Path to a plain UTF-8 .txt file (one segment per line)",
+        help="Path to a plain UTF-8 .txt file (one passage per line)",
+    )
+    src.add_argument(
+        "--jsonl-input",
+        help="Path to a .jsonl file with segmentnr + original fields (preserves segmentnrs for benchmarking)",
     )
     src.add_argument(
         "--demo",
@@ -583,8 +616,10 @@ def main():
         segments = load_segments_from_dir(args.segments_dir, args.min_length)
     elif args.input_file:
         segments = load_segments_from_txt(args.input_file, args.min_length)
+    elif args.jsonl_input:
+        segments = load_segments_from_jsonl(args.jsonl_input, args.min_length)
     else:
-        print("Error: supply --segments-dir, --input-file, or --demo", file=sys.stderr)
+        print("Error: supply --segments-dir, --input-file, --jsonl-input, or --demo", file=sys.stderr)
         sys.exit(1)
 
     if not segments:
@@ -614,7 +649,7 @@ def main():
     # ---- Show & save ----
     print()
     print_samples(rows)
-    save_for_eval(rows, args.output, args.strategy, args.chunk_size)
+    save_for_eval(rows, args.output, args.strategy)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ venv/
 # Pipeline output
 sanskrit_eval_*.jsonl
 sanskrit_chunks_*.jsonl
+sanskrit_input.jsonl
+sanskrit_texts.txt
 
 # HuggingFace cache
 .cache/
